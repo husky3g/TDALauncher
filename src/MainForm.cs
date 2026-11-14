@@ -52,8 +52,12 @@ namespace TDALauncher
 
     class MainForm : Form
     {
-        const int W = 1180, H = 520, MainW = 860;   // left 860px: play area, right: announcements
-        float scale = 1f;
+        // Layout is designed on a W x H canvas ("logical" units). It is zoomed uniformly to fit the window
+        // (s, ox, oy); the window chrome is scaled by the Windows display scaling only (dpi).
+        const int W = 1180, H = 520, MainW = 860;   // left 860: play area, right: announcements
+        const int ChromeH = 36, ChromeBtn = 46, Grip = 6;
+        float dpi = 1f, s = 1f, ox, oy;
+        bool maxed; Rectangle restoreBounds;
 
         Phase phase = Phase.Checking;
         string arma, message = "", error;
@@ -66,7 +70,6 @@ namespace TDALauncher
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 400 };
         readonly ToolTip tip = new ToolTip();
 
-        Rectangle rClose = new Rectangle(W - 46, 0, 46, 36), rMin = new Rectangle(W - 92, 0, 46, 36);
         Rectangle rPlay = new Rectangle(626, 424, 194, 58), rDiscord = new Rectangle(552, 425, 56, 56);
         Rectangle rPanel = new Rectangle(40, 344, 420, 140), rLocate;
         string hover;
@@ -90,8 +93,10 @@ namespace TDALauncher
             DoubleBuffered = true;
             BackColor = Pal.SkyTop;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { }
-            using (var g = CreateGraphics()) scale = Math.Max(1f, g.DpiX / 96f);
-            ClientSize = new Size((int)(W * scale), (int)(H * scale));
+            using (var g = CreateGraphics()) dpi = Math.Max(1f, g.DpiX / 96f);
+            MinimumSize = new Size((int)(W * dpi * 0.6f), (int)(H * dpi * 0.6f));
+            ClientSize = SavedSize() ?? new Size((int)(W * dpi), (int)(H * dpi));
+            UpdateView();
 
             string fam = FontExists("Segoe UI") ? "Segoe UI" : FontFamily.GenericSansSerif.Name;
             fTitle = new Font(fam, 50, FontStyle.Bold, GraphicsUnit.Pixel);
@@ -105,14 +110,108 @@ namespace TDALauncher
             rLocate = new Rectangle(rPanel.Left, rPanel.Bottom + 4, 140, 18);
             rNewsLink = new Rectangle(rNews.Left + 16, rNews.Top + 38, 170, 16);
 
-            scene = DrawScene();
-            timer.Tick += (s, e) => OnTick();
+            timer.Tick += (sender, e) => OnTick();
             timer.Start();
             Updater.CleanUp();
             new Thread(QueryServerLoop) { IsBackground = true }.Start();
             new Thread(NewsLoop) { IsBackground = true }.Start();
             new Thread(CheckForUpdate) { IsBackground = true }.Start();
             Evaluate();
+        }
+
+        // ------------------------------------------------------------------ window size / resizing
+        void UpdateView()
+        {
+            int cw = Math.Max(1, ClientSize.Width), ch = Math.Max(1, ClientSize.Height);
+            float ns = Math.Min(cw / (float)W, ch / (float)H);
+            if (ns != s) { foreach (Font f in gdiFonts.Values) f.Dispose(); gdiFonts.Clear(); }
+            s = ns; ox = (cw - W * s) / 2f; oy = (ch - H * s) / 2f;
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            UpdateView();
+            Invalidate();
+        }
+
+        Size? SavedSize()
+        {
+            string[] v = (Settings.Get("window") ?? "").Split(',');
+            int w, h;
+            if (v.Length != 2 || !int.TryParse(v[0], out w) || !int.TryParse(v[1], out h)) return null;
+            Rectangle area = Screen.PrimaryScreen.WorkingArea;
+            return new Size(Math.Max(MinimumSize.Width, Math.Min(w, area.Width)), Math.Max(MinimumSize.Height, Math.Min(h, area.Height)));
+        }
+
+        void ToggleMaximize()
+        {
+            if (!maxed) { restoreBounds = Bounds; maxed = true; Bounds = Screen.FromControl(this).WorkingArea; }
+            else { maxed = false; Bounds = restoreBounds; }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            Size sz = maxed ? restoreBounds.Size : ClientSize;
+            if (WindowState == FormWindowState.Normal) Settings.Set("window", sz.Width + "," + sz.Height);
+            base.OnFormClosed(e);
+        }
+
+        // Borderless window: report the outer few pixels as resize edges so Windows handles dragging them.
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg == 0x84 /* WM_NCHITTEST */ && !maxed && (int)m.Result == 1 /* HTCLIENT */)
+            {
+                long lp = m.LParam.ToInt64();
+                Point p = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                int gp = (int)(Grip * dpi);
+                bool l = p.X < gp, r = p.X >= ClientSize.Width - gp, t = p.Y < gp, b = p.Y >= ClientSize.Height - gp;
+                int ht = t && l ? 13 : t && r ? 14 : b && l ? 16 : b && r ? 17 : l ? 10 : r ? 11 : t ? 12 : b ? 15 : 1;
+                m.Result = (IntPtr)ht;
+            }
+        }
+
+        // Window buttons (in chrome units = device pixels / dpi), pinned to the window's top-right corner.
+        RectangleF ChromeButton(int indexFromRight)
+        {
+            float cw = ClientSize.Width / dpi;
+            return new RectangleF(cw - ChromeBtn * (indexFromRight + 1), 0, ChromeBtn, ChromeH);
+        }
+
+        string ChromeHit(Point device)
+        {
+            var p = new PointF(device.X / dpi, device.Y / dpi);
+            if (ChromeButton(0).Contains(p)) return "close";
+            if (ChromeButton(1).Contains(p)) return "max";
+            if (ChromeButton(2).Contains(p)) return "min";
+            return null;
+        }
+
+        void DrawChrome(Graphics g)
+        {
+            GraphicsState st = g.Save();
+            g.ScaleTransform(dpi, dpi);
+            using (var b = new SolidBrush(Pal.Muted))
+            {
+                g.DrawString("TDA LAUNCHER", fBar, b, 18, 11);
+                g.DrawString("v" + AppVersion.Text, fSmall, b, 18 + g.MeasureString("TDA LAUNCHER", fBar).Width + 2, 12);
+            }
+            RectangleF rc = ChromeButton(0), rx = ChromeButton(1), rm = ChromeButton(2);
+            using (var b = new SolidBrush(Color.FromArgb(30, 255, 255, 255)))
+            {
+                if (hover == "min") g.FillRectangle(b, rm);
+                if (hover == "max") g.FillRectangle(b, rx);
+            }
+            if (hover == "close") using (var b = new SolidBrush(Color.FromArgb(200, 180, 60, 50))) g.FillRectangle(b, rc);
+            using (var p = new Pen(Pal.Cream, 1.3f))
+            {
+                g.DrawLine(p, rm.Left + 18, 18, rm.Left + 28, 18);
+                if (maxed) { g.DrawRectangle(p, rx.Left + 18, 15, 8, 8); g.DrawLines(p, new[] { new PointF(rx.Left + 20, 15), new PointF(rx.Left + 20, 13), new PointF(rx.Left + 28, 13), new PointF(rx.Left + 28, 21), new PointF(rx.Left + 26, 21) }); }
+                else g.DrawRectangle(p, rx.Left + 18, 13, 10, 10);
+                g.DrawLine(p, rc.Left + 18, 13, rc.Left + 28, 23); g.DrawLine(p, rc.Left + 28, 13, rc.Left + 18, 23);
+            }
+            g.Restore(st);
         }
 
         // ------------------------------------------------------------------ self-update
@@ -321,12 +420,11 @@ namespace TDALauncher
         [DllImport("user32")] static extern bool ReleaseCapture();
         [DllImport("user32")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
 
-        Point Logical(Point p) { return new Point((int)(p.X / scale), (int)(p.Y / scale)); }
+        Point Logical(Point p) { return new Point((int)Math.Floor((p.X - ox) / s), (int)Math.Floor((p.Y - oy) / s)); }
+        string Hit(Point device) { return ChromeHit(device) ?? HitTest(Logical(device)); }
 
         string HitTest(Point p)
         {
-            if (rClose.Contains(p)) return "close";
-            if (rMin.Contains(p)) return "min";
             if (rPlay.Contains(p)) return "play";
             if (Distance(p, rDiscord) <= rDiscord.Width / 2) return "discord";
             if (rLocate.Contains(p) && phase != Phase.Installing && phase != Phase.Updating) return "locate";
@@ -393,7 +491,7 @@ namespace TDALauncher
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            string h = HitTest(Logical(e.Location));
+            string h = Hit(e.Location);
             if (h != hover)
             {
                 hover = h;
@@ -409,12 +507,18 @@ namespace TDALauncher
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
-            string h = HitTest(Logical(e.Location));
-            if (h == null) { ReleaseCapture(); SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero); return; }
+            string h = Hit(e.Location);
+            if (h == null)
+            {
+                if (e.Clicks == 2 && e.Y < ChromeH * dpi) { ToggleMaximize(); return; }        // double-click title bar
+                if (!maxed) { ReleaseCapture(); SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero); }  // drag to move
+                return;
+            }
             switch (h)
             {
                 case "close": Close(); break;
                 case "min": WindowState = FormWindowState.Minimized; break;
+                case "max": ToggleMaximize(); break;
                 case "discord": Steam.Open(Config.Discord); break;
                 case "play": if (PlayEnabled) PrimaryClick(); break;
                 case "locate": Locate(); break;
@@ -440,25 +544,14 @@ namespace TDALauncher
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
-            g.ScaleTransform(scale, scale);
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.DrawImage(scene, 0, 0, W, H);
+            if (scene == null || scene.Size != ClientSize) { if (scene != null) scene.Dispose(); scene = DrawScene(); }
+            g.DrawImageUnscaled(scene, 0, 0);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-            // title bar
-            using (var b = new SolidBrush(Pal.Muted))
-            {
-                g.DrawString("TDA LAUNCHER", fBar, b, 18, 11);
-                g.DrawString("v" + AppVersion.Text, fSmall, b, 18 + g.MeasureString("TDA LAUNCHER", fBar).Width + 2, 12);
-            }
-            if (hover == "min") using (var b = new SolidBrush(Color.FromArgb(30, 255, 255, 255))) g.FillRectangle(b, rMin);
-            if (hover == "close") using (var b = new SolidBrush(Color.FromArgb(200, 180, 60, 50))) g.FillRectangle(b, rClose);
-            using (var p = new Pen(Pal.Cream, 1.3f))
-            {
-                g.DrawLine(p, rMin.Left + 18, 18, rMin.Left + 28, 18);
-                g.DrawLine(p, rClose.Left + 18, 13, rClose.Left + 28, 23); g.DrawLine(p, rClose.Left + 28, 13, rClose.Left + 18, 23);
-            }
+            DrawChrome(g);
+            g.TranslateTransform(ox, oy);
+            g.ScaleTransform(s, s);
 
             // headline (spaced, with soft shadow like the banner)
             DrawSpaced(g, "THE DAY AFTER", fTitle, Pal.Cream, MainW / 2f, 66, 7f, true);
@@ -479,7 +572,7 @@ namespace TDALauncher
             using (var path = Round(rPanel, 10)) using (var b = new SolidBrush(Pal.Panel)) using (var p = new Pen(Pal.Line)) { g.FillPath(b, path); g.DrawPath(p, path); }
             int y = rPanel.Top + 12;
             DrawRow(g, y, "Arma 3", arma != null ? 2 : (phase == Phase.NoSteam ? 0 : 1), arma != null ? "Installed" : (phase == Phase.NoSteam ? "Waiting for Steam" : "Not installed"));
-            foreach (Mod m in Config.Mods) { y += 31; string s; DrawRow(g, y, m.Name, ModLevel(m, out s), s); }
+            foreach (Mod m in Config.Mods) { y += 31; string status; DrawRow(g, y, m.Name, ModLevel(m, out status), status); }
             using (var b = new SolidBrush(hover == "locate" ? Pal.Tan : Pal.Muted)) g.DrawString("Arma 3 folder...", fSmall, b, rLocate.Left + 2, rLocate.Top);
 
             // status message + progress
@@ -561,7 +654,7 @@ namespace TDALauncher
                 return;
             }
 
-            GraphicsState saved = g.Save();
+            Region savedClip = g.Clip;   // restored by hand: see GdiText
             g.SetClip(list);
             float tw = list.Width - 26, y = list.Top - newsScroll;
             using (var cream = new SolidBrush(Pal.Cream))
@@ -579,15 +672,15 @@ namespace TDALauncher
                         if (hover == "post:" + i) using (var hp = Round(card, 6)) g.FillPath(hl, hp);
                         string ago = News.Ago(n.Time);
                         SizeF agoSize = g.MeasureString(ago, fSmall);
-                        GdiText(g, n.Author, fBodyB, Pal.Cream, new RectangleF(card.Left + 10, y + 8, tw - agoSize.Width - 6, 18), TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                        GdiText(g, n.Author, fBodyB, Pal.Cream, new RectangleF(card.Left + 10, y + 8, tw - agoSize.Width - 6, 18), list, TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
                         g.DrawString(ago, fSmall, muted, card.Left + 10 + tw - agoSize.Width, y + 9);
-                        GdiText(g, n.Text, fNews, Color.FromArgb(214, 210, 200), new RectangleF(card.Left + 10, y + 30, tw, th + 2), TextFormatFlags.WordBreak);
+                        GdiText(g, n.Text, fNews, Color.FromArgb(214, 210, 200), new RectangleF(card.Left + 10, y + 30, tw, th + 2), list, TextFormatFlags.WordBreak);
                         if (i < news.Count - 1) g.DrawLine(line, card.Left + 10, card.Bottom, card.Left + 10 + tw, card.Bottom);
                     }
                     newsHits.Add(new KeyValuePair<RectangleF, string>(card, n.Url));
                     y = card.Bottom + 1;
                 }
-            g.Restore(saved);
+            g.Clip = savedClip; savedClip.Dispose();
 
             float total = y + newsScroll - list.Top;
             newsMax = Math.Max(0, total - list.Height);
@@ -601,27 +694,36 @@ namespace TDALauncher
         }
 
         // Announcement text goes through GDI (TextRenderer): unlike GDI+ it falls back to Segoe UI Emoji etc.
-        // TextRenderer ignores the DPI scale transform, so the font and rectangle are scaled by hand.
+        // TextRenderer ignores the Graphics transform, so the font, text box and clip are converted to device
+        // pixels by hand (logical -> device: ox + x * s, oy + y * s).
         readonly Dictionary<Font, Font> gdiFonts = new Dictionary<Font, Font>();
         Font Scaled(Font f)
         {
-            Font s;
-            if (!gdiFonts.TryGetValue(f, out s)) gdiFonts[f] = s = new Font(f.FontFamily, f.Size * scale, f.Style, GraphicsUnit.Pixel);
-            return s;
+            Font sf;
+            if (!gdiFonts.TryGetValue(f, out sf)) gdiFonts[f] = sf = new Font(f.FontFamily, f.Size * s, f.Style, GraphicsUnit.Pixel);
+            return sf;
         }
+
+        RectangleF ToDevice(RectangleF r) { return new RectangleF(ox + r.X * s, oy + r.Y * s, r.Width * s, r.Height * s); }
 
         float GdiHeight(string text, Font f, float width)
         {
-            return TextRenderer.MeasureText(text, Scaled(f), new Size((int)(width * scale), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding).Height / scale;
+            return TextRenderer.MeasureText(text, Scaled(f), new Size((int)(width * s), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding).Height / s;
         }
 
-        void GdiText(Graphics g, string text, Font f, Color c, RectangleF r, TextFormatFlags flags)
+        // Note: no Graphics.Save() here or around callers - TextRenderer merges the clip of every saved state
+        // into its own (unscaled), which is what cut the text off at display scaling above 100%.
+        void GdiText(Graphics g, string text, Font f, Color c, RectangleF r, RectangleF clip, TextFormatFlags flags)
         {
-            GraphicsState st = g.Save();
-            g.ResetTransform();
-            var rr = Rectangle.Round(new RectangleF(r.X * scale, r.Y * scale, r.Width * scale, r.Height * scale));
-            TextRenderer.DrawText(g, text, Scaled(f), rr, c, flags | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
-            g.Restore(st);
+            using (Matrix m = g.Transform)
+            using (Region oldClip = g.Clip)
+            {
+                g.ResetTransform();
+                g.SetClip(ToDevice(clip));   // device space: exactly the panel's on-screen area
+                TextRenderer.DrawText(g, text, Scaled(f), Rectangle.Round(ToDevice(r)), c, flags | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+                g.Transform = m;
+                g.Clip = oldClip;
+            }
         }
 
         static void DrawSpacedLeft(Graphics g, string text, Font f, Color color, float left, float y, float spacing)
@@ -729,51 +831,67 @@ namespace TDALauncher
         }
 
         // ------------------------------------------------------------------ background: dusk over a palm island
+        // Drawn at the window's pixel size. Laid out in logical units like the rest of the UI, but extended
+        // past the W x H canvas (sky, sea and a repeating island ridge) so it always fills the whole window.
+        static readonly float[] Hills = { 300, 296, 288, 274, 270, 276, 282, 286, 294, 304, 312, 320, 326, 328, 326, 318, 306, 300, 292, 286, 280, 284, 290, 300 };
+
+        static float HillY(float x)
+        {
+            float step = W / (float)(Hills.Length - 1), u = ((x % W) + W) % W;
+            int i = Math.Min(Hills.Length - 2, (int)(u / step));
+            return Hills[i] + (Hills[i + 1] - Hills[i]) * ((u - i * step) / step);
+        }
+
         Bitmap DrawScene()
         {
-            int sw = (int)(W * scale), sh = (int)(H * scale);
-            var bmp = new Bitmap(sw, sh);
+            int cw = Math.Max(1, ClientSize.Width), ch = Math.Max(1, ClientSize.Height);
+            var bmp = new Bitmap(cw, ch);
             using (var g = Graphics.FromImage(bmp))
             {
-                g.ScaleTransform(scale, scale);
+                g.TranslateTransform(ox, oy);
+                g.ScaleTransform(s, s);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                float x0 = -ox / s - 2, x1 = (cw - ox) / s + 2, y0 = -oy / s - 2, y1 = (ch - oy) / s + 2, sw = x1 - x0;
                 const float horizon = 330f;
                 var sun = new PointF(530, horizon);
 
-                using (var b = new LinearGradientBrush(new RectangleF(0, 0, W, horizon), Pal.SkyTop, Pal.SkyMid, 90f)) g.FillRectangle(b, 0, 0, W, horizon);
+                using (var b = new LinearGradientBrush(new RectangleF(x0, y0, sw, horizon - y0), Pal.SkyTop, Pal.SkyMid, 90f)) g.FillRectangle(b, x0, y0, sw, horizon - y0);
                 // warm band along the horizon
-                using (var b = new LinearGradientBrush(new RectangleF(0, 170, W, horizon - 170), Color.FromArgb(0, Pal.Glow), Color.FromArgb(150, 120, 74, 44), 90f))
-                    g.FillRectangle(b, 0, 171, W, horizon - 171);
+                using (var b = new LinearGradientBrush(new RectangleF(x0, 170, sw, horizon - 170), Color.FromArgb(0, Pal.Glow), Color.FromArgb(150, 120, 74, 44), 90f))
+                    g.FillRectangle(b, x0, 171, sw, horizon - 171);
                 // glow around the sun
                 using (var gp = new GraphicsPath())
                 {
                     gp.AddEllipse(sun.X - 330, sun.Y - 230, 660, 460);
                     using (var b = new PathGradientBrush(gp) { CenterPoint = sun, CenterColor = Color.FromArgb(235, Pal.Glow), SurroundColors = new[] { Color.FromArgb(0, Pal.Glow) } })
-                        g.FillRectangle(b, 0, 0, W, horizon);
+                        g.FillRectangle(b, sun.X - 330, Math.Max(y0, sun.Y - 230), 660, horizon - Math.Max(y0, sun.Y - 230));
                 }
                 using (var b = new SolidBrush(Pal.Sun)) g.FillEllipse(b, sun.X - 42, sun.Y - 40, 84, 84);
 
-                // island ridge
-                var rnd = new Random(11);
-                var ridge = new List<PointF> { new PointF(-10, horizon + 2), new PointF(-10, 300) };
-                float[] hills = { 300, 296, 288, 274, 270, 276, 282, 286, 294, 304, 312, 320, 326, 328, 326, 318, 306, 300, 292, 286, 280, 284, 290, 300 };
-                for (int i = 0; i < hills.Length; i++) ridge.Add(new PointF(i * W / (float)(hills.Length - 1), hills[i] + (float)rnd.NextDouble() * 5));
-                ridge.Add(new PointF(W + 10, 296)); ridge.Add(new PointF(W + 10, horizon + 2));
+                // island ridge (repeats every W so wide windows stay filled)
+                var ridge = new List<PointF> { new PointF(x0, horizon + 2) };
+                float step = W / (float)(Hills.Length - 1);
+                for (float x = (float)Math.Floor(x0 / step) * step; x <= x1 + step; x += step) ridge.Add(new PointF(x, HillY(x)));
+                ridge.Add(new PointF(x1 + step, horizon + 2));
                 using (var b = new SolidBrush(Pal.Land)) g.FillPolygon(b, ridge.ToArray());
 
                 // palms on the ridge
                 using (var p = new Pen(Pal.Land, 2.2f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 {
                     float[] xs = { 30, 70, 92, 150, 250, 268, 370, 386, 455, 640, 672, 690, 738, 760, 806, 900, 990, 1010, 1060, 1080, 1150, 1180 };
-                    foreach (float x0 in xs)
+                    for (int k = (int)Math.Floor(x0 / W) - 1; k <= (int)Math.Ceiling(x1 / W); k++)
+                    for (int j = 0; j < xs.Length; j++)
                     {
-                        float x = x0 * W / 1200f; if (Math.Abs(x - sun.X) < 50 && rnd.Next(2) == 0) continue;
-                        float gy = RidgeY(ridge, x) + 2, hgt = 22 + (float)rnd.NextDouble() * 20, lean = (float)(rnd.NextDouble() - 0.5) * 12;
+                        float x = xs[j] * W / 1200f + k * W;
+                        if (x < x0 - 40 || x > x1 + 40) continue;
+                        var rnd = new Random(11 + j * 7919 + k * 104729);
+                        if (k == 0 && Math.Abs(x - sun.X) < 50 && rnd.Next(2) == 0) continue;
+                        float gy = HillY(x) + 2, hgt = 22 + (float)rnd.NextDouble() * 20, lean = (float)(rnd.NextDouble() - 0.5) * 12;
                         var top = new PointF(x + lean, gy - hgt);
                         g.DrawBezier(p, new PointF(x, gy), new PointF(x + lean * 0.2f, gy - hgt * 0.4f), new PointF(x + lean * 0.8f, gy - hgt * 0.7f), top);
-                        for (int k = 0; k < 6; k++)
+                        for (int f = 0; f < 6; f++)
                         {
-                            double a = Math.PI * (1.05 + k * 0.18) + (rnd.NextDouble() - 0.5) * 0.2;
+                            double a = Math.PI * (1.05 + f * 0.18) + (rnd.NextDouble() - 0.5) * 0.2;
                             float len = 12 + (float)rnd.NextDouble() * 8;
                             var end = new PointF(top.X + (float)Math.Cos(a) * len, top.Y + (float)Math.Sin(a) * len * 0.5f + 7);
                             g.DrawBezier(p, top, new PointF(top.X + (float)Math.Cos(a) * len * 0.5f, top.Y - 4), new PointF(end.X, end.Y - 5), end);
@@ -782,7 +900,7 @@ namespace TDALauncher
                 }
 
                 // sea + sun reflection
-                using (var b = new SolidBrush(Pal.Water)) g.FillRectangle(b, 0, horizon, W, H - horizon);
+                using (var b = new SolidBrush(Pal.Water)) g.FillRectangle(b, x0, horizon, sw, y1 - horizon);
                 using (var p = new Pen(Color.FromArgb(110, 140, 112, 82), 1.4f))
                     for (int i = 0; i < 6; i++)
                     {
@@ -793,16 +911,5 @@ namespace TDALauncher
             return bmp;
         }
 
-        static float RidgeY(List<PointF> ridge, float x)
-        {
-            for (int i = 2; i < ridge.Count - 2; i++)
-                if (ridge[i].X >= x)
-                {
-                    var a = ridge[i - 1]; var b = ridge[i];
-                    float t = (b.X - a.X) == 0 ? 0 : (x - a.X) / (b.X - a.X);
-                    return a.Y + (b.Y - a.Y) * t;
-                }
-            return 300;
-        }
     }
 }
