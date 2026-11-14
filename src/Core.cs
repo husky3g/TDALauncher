@@ -23,10 +23,10 @@ namespace TDALauncher
         public const string Discord = "https://discord.gg/fSqqJg5W3";
 
         // Schedule (CET = UTC+1 in November). Mods can always be preloaded; these only gate the Play button.
-        //   First Founder's Session: Fri 20 Nov 2026 19:00 CET - Play unlocks while the server is open (not password-locked).
+        //   Founder's Session:       Sat 21 Nov 2026 19:00 CET - Play unlocks while the server is open (not password-locked).
         //   Launch day:              Fri 27 Nov 2026 00:00 CET - countdown ends, button shows "Starting soon" until the server opens.
         //   Full launch:             Fri 27 Nov 2026 19:00 CET - shown to players as the launch time.
-        public static readonly DateTime FoundersUtc = new DateTime(2026, 11, 20, 18, 0, 0, DateTimeKind.Utc);
+        public static readonly DateTime FoundersUtc = new DateTime(2026, 11, 21, 18, 0, 0, DateTimeKind.Utc);
         public static readonly DateTime LaunchDayUtc = new DateTime(2026, 11, 26, 23, 0, 0, DateTimeKind.Utc);
         public static readonly DateTime FullLaunchUtc = new DateTime(2026, 11, 27, 18, 0, 0, DateTimeKind.Utc);
         // How long after the session start a locked server still counts as "about to open" (unless it has already opened).

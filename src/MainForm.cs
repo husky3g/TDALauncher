@@ -369,7 +369,7 @@ namespace TDALauncher
         {
             switch (g)
             {
-                case Gate.CountdownFounders: return "Mods are ready. First Founder's Session: " + Config.Local(Config.FoundersUtc) + " (your time).";
+                case Gate.CountdownFounders: return "Mods are ready. Founder's Session: " + Config.Local(Config.FoundersUtc) + " (your time).";
                 case Gate.CountdownLaunch: return "Mods are ready. Full launch: " + Config.Local(Config.FullLaunchUtc) + " (your time).";
                 case Gate.StartingSoon: return Clock.UtcNow >= Config.LaunchDayUtc ? "Launch day! Play unlocks as soon as the server opens." : "Founder's Session! Play unlocks as soon as the server opens.";
                 case Gate.Checking: return "Checking the server...";
