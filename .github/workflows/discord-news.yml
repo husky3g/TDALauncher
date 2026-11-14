@@ -1,0 +1,45 @@
+name: Discord announcements
+
+# Copies the latest #server-announcements posts into news.json on the "news" branch,
+# which the launcher reads. Needs the DISCORD_BOT_TOKEN repository secret (see README).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: discord-news
+  cancel-in-progress: false
+
+jobs:
+  news:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the announcements channel
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+        run: python3 .github/scripts/discord_news.py "$RUNNER_TEMP/news.json"
+
+      - name: Publish to the news branch (only when something changed)
+        run: |
+          f="$RUNNER_TEMP/news.json"
+          [ -f "$f" ] || exit 0
+          if git fetch --depth=1 origin news 2>/dev/null \
+             && git show FETCH_HEAD:news.json > "$RUNNER_TEMP/old.json" 2>/dev/null \
+             && cmp -s "$f" "$RUNNER_TEMP/old.json"; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan news-publish
+          git rm -rfq --cached .
+          cp "$f" news.json
+          git add news.json
+          git commit -qm "Update announcements"
+          git push -qf origin HEAD:news

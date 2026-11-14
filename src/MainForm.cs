@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -47,11 +48,11 @@ namespace TDALauncher
         public static readonly Color Discord = Color.FromArgb(88, 101, 242);
     }
 
-    enum Phase { NoSteam, NoArma, Checking, NeedInstall, Installing, Manual, Ready, Launching }
+    enum Phase { NoSteam, NoArma, Checking, NeedInstall, Installing, Manual, Ready, Launching, Updating }
 
     class MainForm : Form
     {
-        const int W = 860, H = 520;
+        const int W = 1180, H = 520, MainW = 860;   // left 860px: play area, right: announcements
         float scale = 1f;
 
         Phase phase = Phase.Checking;
@@ -70,7 +71,16 @@ namespace TDALauncher
         Rectangle rPanel = new Rectangle(40, 344, 420, 140), rLocate;
         string hover;
 
-        Font fTitle, fSub, fBody, fBodyB, fSmall, fButton, fBar;
+        // announcements
+        Rectangle rNews = new Rectangle(MainW + 20, 52, W - MainW - 40, 444), rNewsLink;
+        List<NewsPost> news; string newsState = "Loading announcements...";
+        float newsScroll, newsMax;
+        readonly List<KeyValuePair<RectangleF, string>> newsHits = new List<KeyValuePair<RectangleF, string>>();
+
+        // self-update
+        UpdateInfo pendingUpdate; string updateError;
+
+        Font fTitle, fSub, fBody, fBodyB, fSmall, fButton, fBar, fNews;
 
         public MainForm()
         {
@@ -91,13 +101,78 @@ namespace TDALauncher
             fSmall = new Font(fam, 12, FontStyle.Regular, GraphicsUnit.Pixel);
             fButton = new Font(fam, 22, FontStyle.Bold, GraphicsUnit.Pixel);
             fBar = new Font(fam, 12, FontStyle.Bold, GraphicsUnit.Pixel);
+            fNews = new Font(fam, 13, FontStyle.Regular, GraphicsUnit.Pixel);
             rLocate = new Rectangle(rPanel.Left, rPanel.Bottom + 4, 140, 18);
+            rNewsLink = new Rectangle(rNews.Left + 16, rNews.Top + 38, 170, 16);
 
             scene = DrawScene();
             timer.Tick += (s, e) => OnTick();
             timer.Start();
+            Updater.CleanUp();
             new Thread(QueryServerLoop) { IsBackground = true }.Start();
+            new Thread(NewsLoop) { IsBackground = true }.Start();
+            new Thread(CheckForUpdate) { IsBackground = true }.Start();
             Evaluate();
+        }
+
+        // ------------------------------------------------------------------ self-update
+        void CheckForUpdate()
+        {
+            try
+            {
+                UpdateInfo u = Updater.Check();
+                if (u != null) BeginInvoke((Action)(() => { pendingUpdate = u; TryApplyUpdate(); }));
+            }
+            catch (Exception) { }   // offline / GitHub unreachable: just keep the current version
+        }
+
+        // Updates right away unless mods are downloading or the game is launching (then it waits for that to finish).
+        void TryApplyUpdate()
+        {
+            if (pendingUpdate == null || phase == Phase.Installing || phase == Phase.Launching || phase == Phase.Updating) return;
+            UpdateInfo u = pendingUpdate; pendingUpdate = null;
+            if (helper != null) try { helper.Kill(); } catch (Exception) { }
+            SetPhase(Phase.Updating, "Updating the launcher to v" + u.Version + "...");
+            new Thread(() =>
+            {
+                string err = null;
+                try { Updater.Apply(u); } catch (Exception e) { err = e.Message; }
+                BeginInvoke((Action)(() =>
+                {
+                    if (err == null)
+                    {
+                        try { Updater.Restart(); Close(); return; } catch (Exception e) { err = e.Message; }
+                    }
+                    updateError = "Launcher update failed (" + err + "). Get the latest from GitHub.";
+                    phase = Phase.Checking; Evaluate();
+                }));
+            }) { IsBackground = true }.Start();
+        }
+
+        // ------------------------------------------------------------------ announcements
+        void NewsLoop()
+        {
+            while (!IsDisposed)
+            {
+                List<NewsPost> list = null; string state;
+                try { list = News.Fetch(); state = list.Count == 0 ? "No announcements yet." : null; }
+                catch (WebException e)
+                {
+                    var r = e.Response as HttpWebResponse;
+                    state = r != null && r.StatusCode == HttpStatusCode.NotFound ? "Announcements will appear here soon." : "Couldn't load announcements.";
+                }
+                catch (Exception) { state = "Couldn't load announcements."; }
+                try
+                {
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (list != null || news == null) { news = list; newsState = state; }   // keep old posts if a refresh fails
+                        Invalidate();
+                    }));
+                }
+                catch (Exception) { return; }
+                Thread.Sleep(5 * 60 * 1000);
+            }
         }
 
         static bool FontExists(string name) { using (var f = new Font(name, 10)) return f.Name == name; }
@@ -145,6 +220,13 @@ namespace TDALauncher
         void HelperFinished(string mode, string err)
         {
             if (helper != null) { try { helper.WaitForExit(2000); helper.Dispose(); } catch (Exception) { } helper = null; }
+            if (phase == Phase.Updating) return;
+            HelperResult(mode, err);
+            TryApplyUpdate();
+        }
+
+        void HelperResult(string mode, string err)
+        {
             if (err != null)
             {
                 // Steam API unavailable: fall back to what's on disk and the Workshop pages.
@@ -244,13 +326,23 @@ namespace TDALauncher
             if (rMin.Contains(p)) return "min";
             if (rPlay.Contains(p)) return "play";
             if (Distance(p, rDiscord) <= rDiscord.Width / 2) return "discord";
-            if (rLocate.Contains(p) && phase != Phase.Installing) return "locate";
+            if (rLocate.Contains(p) && phase != Phase.Installing && phase != Phase.Updating) return "locate";
+            if (rNewsLink.Contains(p)) return "newslink";
+            for (int i = 0; i < newsHits.Count; i++)
+                if (newsHits[i].Key.Contains(p) && p.Y >= rNews.Top + 66 && p.Y <= rNews.Bottom - 8) return "post:" + i;
             return null;
         }
 
         static double Distance(Point p, Rectangle r) { double dx = p.X - (r.Left + r.Width / 2.0), dy = p.Y - (r.Top + r.Height / 2.0); return Math.Sqrt(dx * dx + dy * dy); }
 
-        bool PlayEnabled { get { return phase != Phase.Checking && phase != Phase.Installing && phase != Phase.Launching; } }
+        bool PlayEnabled { get { return phase != Phase.Checking && phase != Phase.Installing && phase != Phase.Launching && phase != Phase.Updating; } }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            if (!rNews.Contains(Logical(e.Location))) return;
+            newsScroll = Math.Max(0, Math.Min(newsMax, newsScroll - e.Delta * 0.5f));
+            hover = null; Invalidate();
+        }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
@@ -278,6 +370,10 @@ namespace TDALauncher
                 case "discord": Steam.Open(Config.Discord); break;
                 case "play": if (PlayEnabled) PrimaryClick(); break;
                 case "locate": Locate(); break;
+                case "newslink": Steam.Open(Config.AnnouncementsUrl); break;
+                default:
+                    if (h.StartsWith("post:")) { int i = int.Parse(h.Substring(5)); if (i < newsHits.Count) Steam.Open(newsHits[i].Value); }
+                    break;
             }
         }
 
@@ -303,7 +399,11 @@ namespace TDALauncher
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
             // title bar
-            using (var b = new SolidBrush(Pal.Muted)) g.DrawString("TDA LAUNCHER", fBar, b, 18, 11);
+            using (var b = new SolidBrush(Pal.Muted))
+            {
+                g.DrawString("TDA LAUNCHER", fBar, b, 18, 11);
+                g.DrawString("v" + AppVersion.Text, fSmall, b, 18 + g.MeasureString("TDA LAUNCHER", fBar).Width + 2, 12);
+            }
             if (hover == "min") using (var b = new SolidBrush(Color.FromArgb(30, 255, 255, 255))) g.FillRectangle(b, rMin);
             if (hover == "close") using (var b = new SolidBrush(Color.FromArgb(200, 180, 60, 50))) g.FillRectangle(b, rClose);
             using (var p = new Pen(Pal.Cream, 1.3f))
@@ -313,8 +413,8 @@ namespace TDALauncher
             }
 
             // headline (spaced, with soft shadow like the banner)
-            DrawSpaced(g, "THE DAY AFTER", fTitle, Pal.Cream, W / 2f, 66, 7f, true);
-            DrawSpaced(g, "BREAKING POINT   ·   BATTLEYE ON   ·   TEMBELAN", fSub, Pal.Tan, W / 2f, 136, 4f, true);
+            DrawSpaced(g, "THE DAY AFTER", fTitle, Pal.Cream, MainW / 2f, 66, 7f, true);
+            DrawSpaced(g, "BREAKING POINT   ·   BATTLEYE ON   ·   TEMBELAN", fSub, Pal.Tan, MainW / 2f, 136, 4f, true);
 
             // server status
             string st; Color dot;
@@ -322,7 +422,7 @@ namespace TDALauncher
             else if (server.Online) { st = "Online  ·  " + server.Players + " / " + server.MaxPlayers + " players" + (string.IsNullOrEmpty(server.Map) ? "" : "  ·  " + server.Map); dot = Pal.Ok; }
             else { st = "Server not responding  ·  " + Config.Host + ":" + Config.Port; dot = Pal.Bad; }
             SizeF ss = g.MeasureString(st, fBody);
-            float sx = W / 2f - (ss.Width + 16) / 2f;
+            float sx = MainW / 2f - (ss.Width + 16) / 2f;
             using (var b = new SolidBrush(dot)) g.FillEllipse(b, sx, 172, 9, 9);
             using (var b = new SolidBrush(Pal.Cream)) g.DrawString(st, fBody, b, sx + 16, 166);
 
@@ -335,7 +435,9 @@ namespace TDALauncher
 
             // status message + progress
             using (var b = new SolidBrush(Pal.Cream)) g.DrawString(message, fBody, b, new RectangleF(552, 384, 270, 40));
-            if (error != null) using (var b = new SolidBrush(Pal.Bad)) g.DrawString(error, fSmall, b, new RectangleF(rLocate.Right + 8, rLocate.Top, 380, 32));
+            string err = error ?? updateError;
+            if (err != null) using (var b = new SolidBrush(Pal.Bad)) g.DrawString(err, fSmall, b, new RectangleF(rLocate.Right + 8, rLocate.Top, 380, 32));
+            DrawNews(g);
             if (phase == Phase.Installing)
             {
                 double pr = Progress();
@@ -360,6 +462,7 @@ namespace TDALauncher
                 case Phase.Installing: label = (int)(Progress() * 100) + "%"; break;
                 case Phase.Manual: label = "OPEN PAGES"; break;
                 case Phase.Launching: label = "LAUNCHING" + Dots(); break;
+                case Phase.Updating: label = "UPDATING" + Dots(); break;
                 default: label = "PLAY"; break;
             }
             Color top = enabled ? (hover == "play" ? Color.FromArgb(232, 168, 104) : Pal.Tan) : Color.FromArgb(70, 78, 80);
@@ -370,6 +473,95 @@ namespace TDALauncher
         }
 
         string Dots() { return new string('.', tick % 4); }
+
+        void DrawNews(Graphics g)
+        {
+            using (var path = Round(rNews, 10)) using (var b = new SolidBrush(Pal.Panel)) using (var p = new Pen(Pal.Line)) { g.FillPath(b, path); g.DrawPath(p, path); }
+            float x = rNews.Left + 16;
+            DrawSpacedLeft(g, "ANNOUNCEMENTS", fSub, Pal.Tan, x, rNews.Top + 14, 3f);
+            using (var b = new SolidBrush(hover == "newslink" ? Pal.Tan : Pal.Muted)) g.DrawString("#server-announcements  ↗", fSmall, b, rNewsLink.Left - 2, rNewsLink.Top);
+            using (var p = new Pen(Pal.Line)) g.DrawLine(p, rNews.Left + 14, rNews.Top + 60, rNews.Right - 14, rNews.Top + 60);
+
+            newsHits.Clear();
+            var list = new RectangleF(rNews.Left + 6, rNews.Top + 66, rNews.Width - 12, rNews.Height - 74);
+            if (news == null || news.Count == 0)
+            {
+                using (var b = new SolidBrush(Pal.Muted))
+                using (var f = new StringFormat { Alignment = StringAlignment.Center })
+                    g.DrawString(newsState ?? "", fBody, b, new RectangleF(list.Left + 10, list.Top + 24, list.Width - 20, 60), f);
+                newsMax = 0;
+                return;
+            }
+
+            GraphicsState saved = g.Save();
+            g.SetClip(list);
+            float tw = list.Width - 26, y = list.Top - newsScroll;
+            using (var cream = new SolidBrush(Pal.Cream))
+            using (var body = new SolidBrush(Color.FromArgb(214, 210, 200)))
+            using (var muted = new SolidBrush(Pal.Muted))
+            using (var hl = new SolidBrush(Color.FromArgb(18, 255, 255, 255)))
+            using (var line = new Pen(Pal.Line))
+                for (int i = 0; i < news.Count; i++)
+                {
+                    NewsPost n = news[i];
+                    float th = GdiHeight(n.Text, fNews, tw);
+                    var card = new RectangleF(list.Left, y, list.Width - 8, th + 42);
+                    if (card.Bottom > list.Top && card.Top < list.Bottom)
+                    {
+                        if (hover == "post:" + i) using (var hp = Round(card, 6)) g.FillPath(hl, hp);
+                        string ago = News.Ago(n.Time);
+                        SizeF agoSize = g.MeasureString(ago, fSmall);
+                        GdiText(g, n.Author, fBodyB, Pal.Cream, new RectangleF(card.Left + 10, y + 8, tw - agoSize.Width - 6, 18), TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                        g.DrawString(ago, fSmall, muted, card.Left + 10 + tw - agoSize.Width, y + 9);
+                        GdiText(g, n.Text, fNews, Color.FromArgb(214, 210, 200), new RectangleF(card.Left + 10, y + 30, tw, th + 2), TextFormatFlags.WordBreak);
+                        if (i < news.Count - 1) g.DrawLine(line, card.Left + 10, card.Bottom, card.Left + 10 + tw, card.Bottom);
+                    }
+                    newsHits.Add(new KeyValuePair<RectangleF, string>(card, n.Url));
+                    y = card.Bottom + 1;
+                }
+            g.Restore(saved);
+
+            float total = y + newsScroll - list.Top;
+            newsMax = Math.Max(0, total - list.Height);
+            if (newsScroll > newsMax) newsScroll = newsMax;
+            if (newsMax > 0)
+            {
+                float thumb = Math.Max(30, list.Height * list.Height / total);
+                float ty = list.Top + (list.Height - thumb) * (newsScroll / newsMax);
+                using (var b = new SolidBrush(Color.FromArgb(90, Pal.Tan))) using (var tp = Round(new RectangleF(list.Right - 4, ty, 3, thumb), 1.5f)) g.FillPath(b, tp);
+            }
+        }
+
+        // Announcement text goes through GDI (TextRenderer): unlike GDI+ it falls back to Segoe UI Emoji etc.
+        // TextRenderer ignores the DPI scale transform, so the font and rectangle are scaled by hand.
+        readonly Dictionary<Font, Font> gdiFonts = new Dictionary<Font, Font>();
+        Font Scaled(Font f)
+        {
+            Font s;
+            if (!gdiFonts.TryGetValue(f, out s)) gdiFonts[f] = s = new Font(f.FontFamily, f.Size * scale, f.Style, GraphicsUnit.Pixel);
+            return s;
+        }
+
+        float GdiHeight(string text, Font f, float width)
+        {
+            return TextRenderer.MeasureText(text, Scaled(f), new Size((int)(width * scale), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding).Height / scale;
+        }
+
+        void GdiText(Graphics g, string text, Font f, Color c, RectangleF r, TextFormatFlags flags)
+        {
+            GraphicsState st = g.Save();
+            g.ResetTransform();
+            var rr = Rectangle.Round(new RectangleF(r.X * scale, r.Y * scale, r.Width * scale, r.Height * scale));
+            TextRenderer.DrawText(g, text, Scaled(f), rr, c, flags | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+            g.Restore(st);
+        }
+
+        static void DrawSpacedLeft(Graphics g, string text, Font f, Color color, float left, float y, float spacing)
+        {
+            var fmt = StringFormat.GenericTypographic;
+            float w = text.Sum(ch => g.MeasureString(ch.ToString(), f, 1000, fmt).Width) + spacing * (text.Length - 1);
+            DrawSpaced(g, text, f, color, left + w / 2f, y, spacing, false);
+        }
 
         double Progress()
         {

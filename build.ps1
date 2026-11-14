@@ -61,7 +61,7 @@ $fw = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $csc = Join-Path $fw 'csc.exe'
 if (!(Test-Path $csc)) { throw ".NET Framework 4 C# compiler not found: $csc" }
 $exe = Join-Path $out 'TDALauncher.exe'
-$refs = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll') | ForEach-Object { "/r:" + (Join-Path $fw $_) }
+$refs = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll') | ForEach-Object { "/r:" + (Join-Path $fw $_) }
 $cs = Get-ChildItem (Join-Path $root 'src') -Filter *.cs | ForEach-Object { $_.FullName }
 $cscArgs = @('/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/warn:4', "/out:$exe", "/win32icon:$ico") + $refs + $cs
 & $csc @cscArgs

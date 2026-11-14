@@ -22,6 +22,12 @@ namespace TDALauncher
         public const string Discord = "https://discord.gg/fSqqJg5W3";
         public const int ArmaAppId = 107410;
 
+        public const string Repo = "husky3g/TDALauncher";
+        public const string DiscordGuild = "1570790498208059534", AnnouncementsChannel = "1570791863747747890";
+        public const string AnnouncementsUrl = "https://discord.com/channels/" + DiscordGuild + "/" + AnnouncementsChannel;
+        // Written by .github/workflows/discord-news.yml (a bot reads the channel; the launcher never holds a token).
+        public const string NewsUrl = "https://raw.githubusercontent.com/" + Repo + "/news/news.json";
+
         // Load order matters: CUP core first, then Breaking Point, then the map.
         public static readonly Mod[] Mods =
         {
@@ -326,6 +332,13 @@ namespace TDALauncher
         public bool Online; public string Name, Map; public int Players, MaxPlayers;
 
         public static ServerInfo Query()
+        {
+            ServerInfo info = null;
+            for (int i = 0; i < 3 && (info == null || !info.Online); i++) info = QueryOnce();
+            return info;
+        }
+
+        static ServerInfo QueryOnce()
         {
             var info = new ServerInfo();
             try
