@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -21,14 +22,22 @@ namespace TDALauncher
         public const int QueryPort = Port + 1;          // Arma 3 Steam query port = game port + 1
         public const string Discord = "https://discord.gg/fSqqJg5W3";
 
-        // Official opening: 20 Nov 2026 19:00 CET (= 18:00 UTC). Until then mods can be preloaded but Play is locked.
-        public static readonly DateTime LaunchUtc = new DateTime(2026, 11, 20, 18, 0, 0, DateTimeKind.Utc);
-        // Shown in the player's own time zone and clock format, e.g. "Fri 20 Nov, 19:00" or "Fri 20 Nov, 1:00 PM".
-        public static string LaunchText
+        // Schedule (CET = UTC+1 in November). Mods can always be preloaded; these only gate the Play button.
+        //   First Founder's Session: Fri 20 Nov 2026 19:00 CET - Play unlocks while the server is open (not password-locked).
+        //   Launch day:              Fri 27 Nov 2026 00:00 CET - countdown ends, button shows "Starting soon" until the server opens.
+        //   Full launch:             Fri 27 Nov 2026 19:00 CET - shown to players as the launch time.
+        public static readonly DateTime FoundersUtc = new DateTime(2026, 11, 20, 18, 0, 0, DateTimeKind.Utc);
+        public static readonly DateTime LaunchDayUtc = new DateTime(2026, 11, 26, 23, 0, 0, DateTimeKind.Utc);
+        public static readonly DateTime FullLaunchUtc = new DateTime(2026, 11, 27, 18, 0, 0, DateTimeKind.Utc);
+        // How long after the session start a locked server still counts as "about to open" (unless it has already opened).
+        public static readonly TimeSpan FoundersGrace = TimeSpan.FromHours(2);
+
+        // A UTC time in the player's own time zone and clock format, e.g. "Fri 20 Nov, 19:00" or "Fri 20 Nov, 1:00 PM".
+        public static string Local(DateTime utc)
         {
-            get { DateTime t = LaunchUtc.ToLocalTime(); return t.ToString("ddd d MMM") + ", " + t.ToShortTimeString(); }
+            DateTime t = utc.ToLocalTime(); return t.ToString("ddd d MMM") + ", " + t.ToShortTimeString();
         }
-        public static bool PreLaunch { get { return DateTime.UtcNow < LaunchUtc; } }
+
         public const int ArmaAppId = 107410;
 
         public const string Repo = "husky3g/TDALauncher";
@@ -44,6 +53,20 @@ namespace TDALauncher
             new Mod(426629791UL,  "Breaking Point"),
             new Mod(1252091296UL, "Tembelan Island"),
         };
+    }
+
+    // Current time; TDA_FAKE_NOW (UTC, e.g. 2026-11-20T18:30:00Z) shifts it for testing the schedule.
+    static class Clock
+    {
+        static readonly TimeSpan offset = Init();
+        public static bool Faked { get { return offset != TimeSpan.Zero; } }
+        public static DateTime UtcNow { get { return DateTime.UtcNow + offset; } }
+        static TimeSpan Init()
+        {
+            string s = Environment.GetEnvironmentVariable("TDA_FAKE_NOW"); DateTime t;
+            return s != null && DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out t)
+                ? t - DateTime.UtcNow : TimeSpan.Zero;
+        }
     }
 
     class Mod
@@ -338,10 +361,13 @@ namespace TDALauncher
     // ------------------------------------------------------------------ server status (Steam A2S_INFO)
     class ServerInfo
     {
-        public bool Online; public string Name, Map; public int Players, MaxPlayers;
+        public bool Online, Locked; public string Name, Map; public int Players, MaxPlayers;
+        public bool Open { get { return Online && !Locked; } }
 
         public static ServerInfo Query()
         {
+            string fake = Environment.GetEnvironmentVariable("TDA_FAKE_SERVER");   // open | locked | offline (testing)
+            if (fake != null) return new ServerInfo { Online = fake != "offline", Locked = fake == "locked", Map = "Tembelan", MaxPlayers = 10 };
             ServerInfo info = null;
             for (int i = 0; i < 3 && (info == null || !info.Online); i++) info = QueryOnce();
             return info;
@@ -370,6 +396,8 @@ namespace TDALauncher
                             info.Name = ReadString(r, ref i); info.Map = ReadString(r, ref i);
                             ReadString(r, ref i); ReadString(r, ref i); i += 2;
                             info.Players = r[i]; info.MaxPlayers = r[i + 1]; info.Online = true;
+                            // then: bots, server type, environment, visibility (1 = password protected)
+                            if (i + 5 < r.Length) info.Locked = r[i + 5] == 1;
                         }
                         break;
                     }

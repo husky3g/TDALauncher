@@ -261,7 +261,7 @@ namespace TDALauncher
                     if (Config.Mods.All(m => m.Ready)) RunHelperOrReady();
                 }
             }
-            if (phase == Phase.Checking || phase == Phase.Installing || phase == Phase.Launching || phase == Phase.Updating || Config.PreLaunch || (phase == Phase.Ready && tick % 5 == 0)) Invalidate();
+            if (phase == Phase.Checking || phase == Phase.Installing || phase == Phase.Launching || phase == Phase.Updating || phase == Phase.Ready || Clock.UtcNow < Config.LaunchDayUtc) Invalidate();
         }
 
         void RunHelperOrReady() { error = null; RunHelper("check"); }
@@ -274,7 +274,10 @@ namespace TDALauncher
                 case Phase.NoArma: Steam.Open("steam://install/" + Config.ArmaAppId); message = "Install Arma 3 from Steam. This updates automatically."; break;
                 case Phase.NeedInstall: RunHelper("install"); break;
                 case Phase.Manual: OpenWorkshopPages(); break;
-                case Phase.Ready: if (Config.PreLaunch) Steam.Open(Config.Discord); else Play(); break;   // before launch: send players to the Discord
+                case Phase.Ready:   // while the server isn't open to play, the button sends players to the Discord
+                    Gate gate = CurrentGate();
+                    if (gate == Gate.Open) Play(); else if (gate != Gate.Checking) Steam.Open(Config.Discord);
+                    break;
             }
             Invalidate();
         }
@@ -304,7 +307,7 @@ namespace TDALauncher
             {
                 var s = ServerInfo.Query();
                 try { BeginInvoke((Action)(() => { server = s; serverQueried = true; Invalidate(); })); } catch (Exception) { return; }
-                Thread.Sleep(30000);
+                Thread.Sleep(20000);
             }
         }
 
@@ -336,11 +339,47 @@ namespace TDALauncher
         static double Distance(Point p, Rectangle r) { double dx = p.X - (r.Left + r.Width / 2.0), dy = p.Y - (r.Top + r.Height / 2.0); return Math.Sqrt(dx * dx + dy * dy); }
 
         bool PlayEnabled { get { return phase != Phase.Checking && phase != Phase.Installing && phase != Phase.Launching && phase != Phase.Updating; } }
-        bool ComingSoon { get { return phase == Phase.Ready && Config.PreLaunch; } }
+        bool Gated { get { return phase == Phase.Ready && CurrentGate() != Gate.Open; } }
 
-        static string Countdown()
+        // ------------------------------------------------------------------ schedule gate for the Play button
+        enum Gate { Open, CountdownFounders, CountdownLaunch, StartingSoon, Checking }
+        bool seenOpen = Settings.Get("foundersSeenOpen") == "1";   // server has been open since the first Founder's Session
+
+        Gate CurrentGate()
         {
-            TimeSpan t = Config.LaunchUtc - DateTime.UtcNow;
+            DateTime now = Clock.UtcNow;
+            if (now < Config.FoundersUtc) return Gate.CountdownFounders;
+            if (serverQueried && server.Open)
+            {
+                if (!seenOpen) { seenOpen = true; if (!Clock.Faked) Settings.Set("foundersSeenOpen", "1"); }
+                return Gate.Open;
+            }
+            if (!serverQueried) return Gate.Checking;
+            if (now >= Config.LaunchDayUtc) return Gate.StartingSoon;                                  // launch day: wait for the unlock
+            if (!seenOpen && now < Config.FoundersUtc + Config.FoundersGrace) return Gate.StartingSoon;  // session about to open
+            return Gate.CountdownLaunch;                                                               // session over: count down to launch day
+        }
+
+        static DateTime? CountdownTarget(Gate g)
+        {
+            return g == Gate.CountdownFounders ? Config.FoundersUtc : g == Gate.CountdownLaunch ? Config.LaunchDayUtc : (DateTime?)null;
+        }
+
+        string GateMessage(Gate g)
+        {
+            switch (g)
+            {
+                case Gate.CountdownFounders: return "Mods are ready. First Founder's Session: " + Config.Local(Config.FoundersUtc) + " (your time).";
+                case Gate.CountdownLaunch: return "Mods are ready. Full launch: " + Config.Local(Config.FullLaunchUtc) + " (your time).";
+                case Gate.StartingSoon: return Clock.UtcNow >= Config.LaunchDayUtc ? "Launch day! Play unlocks as soon as the server opens." : "Founder's Session! Play unlocks as soon as the server opens.";
+                case Gate.Checking: return "Checking the server...";
+                default: return "Everything is installed. Ready to play.";
+            }
+        }
+
+        static string Countdown(DateTime targetUtc)
+        {
+            TimeSpan t = targetUtc - Clock.UtcNow;
             if (t < TimeSpan.Zero) t = TimeSpan.Zero;
             return string.Format("{0}:{1:00}:{2:00}:{3:00}", t.Days, t.Hours, t.Minutes, t.Seconds);
         }
@@ -359,7 +398,7 @@ namespace TDALauncher
             {
                 hover = h;
                 Cursor = h == null || (h == "play" && !PlayEnabled) ? Cursors.Default : Cursors.Hand;
-                if (h == "discord" || (h == "play" && ComingSoon)) tip.Show(h == "discord" ? "Join the official Discord" : "Opens " + Config.LaunchText + " - join the Discord for news", this, e.X + 14, e.Y + 18, 2500);
+                if (h == "discord" || (h == "play" && Gated)) tip.Show(h == "discord" ? "Join the official Discord" : "Join the Discord for news and session times", this, e.X + 14, e.Y + 18, 2500);
                 else tip.Hide(this);
                 Invalidate();
             }
@@ -428,6 +467,7 @@ namespace TDALauncher
             // server status
             string st; Color dot;
             if (!serverQueried) { st = "Checking server..."; dot = Pal.Muted; }
+            else if (server.Online && server.Locked) { st = "Maintenance"; dot = Pal.Tan; }
             else if (server.Online) { st = "Online  ·  " + server.Players + " / " + server.MaxPlayers + " players" + (string.IsNullOrEmpty(server.Map) ? "" : "  ·  " + server.Map); dot = Pal.Ok; }
             else { st = "Restarting / Maintenance"; dot = Pal.Tan; }
             SizeF ss = g.MeasureString(st, fBody);
@@ -443,7 +483,8 @@ namespace TDALauncher
             using (var b = new SolidBrush(hover == "locate" ? Pal.Tan : Pal.Muted)) g.DrawString("Arma 3 folder...", fSmall, b, rLocate.Left + 2, rLocate.Top);
 
             // status message + progress
-            string shown = ComingSoon ? "Mods are ready. The Day After opens " + Config.LaunchText + " (your time)." : message;
+            Gate gate = CurrentGate();
+            string shown = phase == Phase.Ready && gate != Gate.Open ? GateMessage(gate) : message;
             using (var b = new SolidBrush(Pal.Cream)) g.DrawString(shown, fBody, b, new RectangleF(552, 368, 270, 40));
             string err = error ?? updateError;
             if (err != null) using (var b = new SolidBrush(Pal.Bad)) g.DrawString(err, fSmall, b, new RectangleF(rLocate.Right + 8, rLocate.Top, 380, 32));
@@ -473,13 +514,16 @@ namespace TDALauncher
                 case Phase.Manual: label = "OPEN PAGES"; break;
                 case Phase.Launching: label = "LAUNCHING" + Dots(); break;
                 case Phase.Updating: label = "UPDATING" + Dots(); break;
-                default: label = Config.PreLaunch ? "COMING SOON!" : "PLAY"; break;
+                default:
+                    label = gate == Gate.Open ? "PLAY" : gate == Gate.StartingSoon ? "STARTING SOON" : gate == Gate.Checking ? "CHECKING" + Dots() : "COMING SOON!";
+                    break;
             }
 
-            // pre-launch: outlined "coming soon" button with the countdown underneath
-            if (Config.PreLaunch)
-                DrawSpaced(g, Countdown(), fSub, Pal.Tan, rPlay.Left + rPlay.Width / 2f, rPlay.Bottom + 7, 3f, true);
-            if (ComingSoon)
+            // gated: outlined button, with the countdown underneath when there is one (also shown while mods preload)
+            DateTime? target = CountdownTarget(gate);
+            if (target != null)
+                DrawSpaced(g, Countdown(target.Value), fSub, Pal.Tan, rPlay.Left + rPlay.Width / 2f, rPlay.Bottom + 7, 3f, true);
+            if (phase == Phase.Ready && gate != Gate.Open)
             {
                 using (var path = Round(rPlay, 8))
                 using (var b = new SolidBrush(hover == "play" ? Color.FromArgb(230, 52, 42, 34) : Color.FromArgb(215, 24, 30, 32)))
