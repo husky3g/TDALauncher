@@ -429,7 +429,7 @@ namespace TDALauncher
             string st; Color dot;
             if (!serverQueried) { st = "Checking server..."; dot = Pal.Muted; }
             else if (server.Online) { st = "Online  ·  " + server.Players + " / " + server.MaxPlayers + " players" + (string.IsNullOrEmpty(server.Map) ? "" : "  ·  " + server.Map); dot = Pal.Ok; }
-            else { st = "Server not responding  ·  " + Config.Host + ":" + Config.Port; dot = Pal.Bad; }
+            else { st = "Restarting / Maintenance"; dot = Pal.Tan; }
             SizeF ss = g.MeasureString(st, fBody);
             float sx = MainW / 2f - (ss.Width + 16) / 2f;
             using (var b = new SolidBrush(dot)) g.FillEllipse(b, sx, 172, 9, 9);
