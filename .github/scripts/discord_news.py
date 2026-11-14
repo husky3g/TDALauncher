@@ -84,6 +84,10 @@ def clean(text, users):
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+if messages and not any(m.get("content") or m.get("embeds") or m.get("attachments") or m.get("message_snapshots") for m in messages):
+    print("::warning::Every message came back empty - turn on 'Message Content Intent' for the bot in the "
+          "Discord Developer Portal (Bot -> Privileged Gateway Intents).")
+
 posts = []
 for msg in messages:
     if msg.get("type") not in (0, 19):  # normal messages and replies only
