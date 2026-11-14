@@ -20,6 +20,11 @@ namespace TDALauncher
         public const int Port = 2302;
         public const int QueryPort = Port + 1;          // Arma 3 Steam query port = game port + 1
         public const string Discord = "https://discord.gg/fSqqJg5W3";
+
+        // Official opening: 20 Nov 2026 19:00 CET (= 18:00 UTC). Until then mods can be preloaded but Play is locked.
+        public static readonly DateTime LaunchUtc = new DateTime(2026, 11, 20, 18, 0, 0, DateTimeKind.Utc);
+        public const string LaunchText = "20 Nov, 19:00 CET";
+        public static bool PreLaunch { get { return DateTime.UtcNow < LaunchUtc; } }
         public const int ArmaAppId = 107410;
 
         public const string Repo = "husky3g/TDALauncher";

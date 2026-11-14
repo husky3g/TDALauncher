@@ -67,7 +67,7 @@ namespace TDALauncher
         readonly ToolTip tip = new ToolTip();
 
         Rectangle rClose = new Rectangle(W - 46, 0, 46, 36), rMin = new Rectangle(W - 92, 0, 46, 36);
-        Rectangle rPlay = new Rectangle(626, 436, 194, 60), rDiscord = new Rectangle(552, 438, 56, 56);
+        Rectangle rPlay = new Rectangle(626, 424, 194, 58), rDiscord = new Rectangle(552, 425, 56, 56);
         Rectangle rPanel = new Rectangle(40, 344, 420, 140), rLocate;
         string hover;
 
@@ -261,7 +261,7 @@ namespace TDALauncher
                     if (Config.Mods.All(m => m.Ready)) RunHelperOrReady();
                 }
             }
-            if (phase == Phase.Checking || phase == Phase.Installing || phase == Phase.Launching) Invalidate();
+            if (phase == Phase.Checking || phase == Phase.Installing || phase == Phase.Launching || phase == Phase.Updating || Config.PreLaunch || (phase == Phase.Ready && tick % 5 == 0)) Invalidate();
         }
 
         void RunHelperOrReady() { error = null; RunHelper("check"); }
@@ -274,7 +274,7 @@ namespace TDALauncher
                 case Phase.NoArma: Steam.Open("steam://install/" + Config.ArmaAppId); message = "Install Arma 3 from Steam. This updates automatically."; break;
                 case Phase.NeedInstall: RunHelper("install"); break;
                 case Phase.Manual: OpenWorkshopPages(); break;
-                case Phase.Ready: Play(); break;
+                case Phase.Ready: if (Config.PreLaunch) Steam.Open(Config.Discord); else Play(); break;   // before launch: send players to the Discord
             }
             Invalidate();
         }
@@ -336,6 +336,14 @@ namespace TDALauncher
         static double Distance(Point p, Rectangle r) { double dx = p.X - (r.Left + r.Width / 2.0), dy = p.Y - (r.Top + r.Height / 2.0); return Math.Sqrt(dx * dx + dy * dy); }
 
         bool PlayEnabled { get { return phase != Phase.Checking && phase != Phase.Installing && phase != Phase.Launching && phase != Phase.Updating; } }
+        bool ComingSoon { get { return phase == Phase.Ready && Config.PreLaunch; } }
+
+        static string Countdown()
+        {
+            TimeSpan t = Config.LaunchUtc - DateTime.UtcNow;
+            if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+            return string.Format("{0}:{1:00}:{2:00}:{3:00}", t.Days, t.Hours, t.Minutes, t.Seconds);
+        }
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
@@ -351,7 +359,8 @@ namespace TDALauncher
             {
                 hover = h;
                 Cursor = h == null || (h == "play" && !PlayEnabled) ? Cursors.Default : Cursors.Hand;
-                if (h == "discord") tip.Show("Join the official Discord", this, e.X + 14, e.Y + 18, 2500); else tip.Hide(this);
+                if (h == "discord" || (h == "play" && ComingSoon)) tip.Show(h == "discord" ? "Join the official Discord" : "Opens " + Config.LaunchText + " - join the Discord for news", this, e.X + 14, e.Y + 18, 2500);
+                else tip.Hide(this);
                 Invalidate();
             }
         }
@@ -434,14 +443,15 @@ namespace TDALauncher
             using (var b = new SolidBrush(hover == "locate" ? Pal.Tan : Pal.Muted)) g.DrawString("Arma 3 folder...", fSmall, b, rLocate.Left + 2, rLocate.Top);
 
             // status message + progress
-            using (var b = new SolidBrush(Pal.Cream)) g.DrawString(message, fBody, b, new RectangleF(552, 384, 270, 40));
+            string shown = ComingSoon ? "Mods are ready. The Day After opens " + Config.LaunchText + "." : message;
+            using (var b = new SolidBrush(Pal.Cream)) g.DrawString(shown, fBody, b, new RectangleF(552, 368, 270, 40));
             string err = error ?? updateError;
             if (err != null) using (var b = new SolidBrush(Pal.Bad)) g.DrawString(err, fSmall, b, new RectangleF(rLocate.Right + 8, rLocate.Top, 380, 32));
             DrawNews(g);
             if (phase == Phase.Installing)
             {
                 double pr = Progress();
-                var bar = new RectangleF(552, 424, 268, 5);
+                var bar = new RectangleF(552, 410, 268, 5);
                 using (var b = new SolidBrush(Pal.Line)) g.FillRectangle(b, bar);
                 using (var b = new SolidBrush(Pal.Tan)) g.FillRectangle(b, bar.X, bar.Y, (float)(bar.Width * pr), bar.Height);
             }
@@ -463,8 +473,22 @@ namespace TDALauncher
                 case Phase.Manual: label = "OPEN PAGES"; break;
                 case Phase.Launching: label = "LAUNCHING" + Dots(); break;
                 case Phase.Updating: label = "UPDATING" + Dots(); break;
-                default: label = "PLAY"; break;
+                default: label = Config.PreLaunch ? "COMING SOON!" : "PLAY"; break;
             }
+
+            // pre-launch: outlined "coming soon" button with the countdown underneath
+            if (Config.PreLaunch)
+                DrawSpaced(g, Countdown(), fSub, Pal.Tan, rPlay.Left + rPlay.Width / 2f, rPlay.Bottom + 7, 3f, true);
+            if (ComingSoon)
+            {
+                using (var path = Round(rPlay, 8))
+                using (var b = new SolidBrush(hover == "play" ? Color.FromArgb(230, 52, 42, 34) : Color.FromArgb(215, 24, 30, 32)))
+                using (var p = new Pen(hover == "play" ? Color.FromArgb(232, 168, 104) : Pal.Tan, 1.6f)) { g.FillPath(b, path); g.DrawPath(p, path); }
+                using (var f = new Font(fButton.FontFamily, 19, FontStyle.Bold, GraphicsUnit.Pixel))
+                    DrawSpaced(g, label, f, Pal.Tan, rPlay.Left + rPlay.Width / 2f, rPlay.Top + (rPlay.Height - f.Height) / 2f - 1, 1.5f, false);
+                return;
+            }
+
             Color top = enabled ? (hover == "play" ? Color.FromArgb(232, 168, 104) : Pal.Tan) : Color.FromArgb(70, 78, 80);
             Color bottom = enabled ? (hover == "play" ? Color.FromArgb(206, 120, 64) : Color.FromArgb(184, 102, 52)) : Color.FromArgb(56, 63, 65);
             using (var path = Round(rPlay, 8))
