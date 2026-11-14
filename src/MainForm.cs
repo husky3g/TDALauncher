@@ -443,7 +443,7 @@ namespace TDALauncher
             using (var b = new SolidBrush(hover == "locate" ? Pal.Tan : Pal.Muted)) g.DrawString("Arma 3 folder...", fSmall, b, rLocate.Left + 2, rLocate.Top);
 
             // status message + progress
-            string shown = ComingSoon ? "Mods are ready. The Day After opens " + Config.LaunchText + "." : message;
+            string shown = ComingSoon ? "Mods are ready. The Day After opens " + Config.LaunchText + " (your time)." : message;
             using (var b = new SolidBrush(Pal.Cream)) g.DrawString(shown, fBody, b, new RectangleF(552, 368, 270, 40));
             string err = error ?? updateError;
             if (err != null) using (var b = new SolidBrush(Pal.Bad)) g.DrawString(err, fSmall, b, new RectangleF(rLocate.Right + 8, rLocate.Top, 380, 32));

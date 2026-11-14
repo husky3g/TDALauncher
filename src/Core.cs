@@ -23,7 +23,11 @@ namespace TDALauncher
 
         // Official opening: 20 Nov 2026 19:00 CET (= 18:00 UTC). Until then mods can be preloaded but Play is locked.
         public static readonly DateTime LaunchUtc = new DateTime(2026, 11, 20, 18, 0, 0, DateTimeKind.Utc);
-        public const string LaunchText = "20 Nov, 19:00 CET";
+        // Shown in the player's own time zone and clock format, e.g. "Fri 20 Nov, 19:00" or "Fri 20 Nov, 1:00 PM".
+        public static string LaunchText
+        {
+            get { DateTime t = LaunchUtc.ToLocalTime(); return t.ToString("ddd d MMM") + ", " + t.ToShortTimeString(); }
+        }
         public static bool PreLaunch { get { return DateTime.UtcNow < LaunchUtc; } }
         public const int ArmaAppId = 107410;
 
